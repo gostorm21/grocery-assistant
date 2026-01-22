@@ -77,3 +77,20 @@ def dispose_engine() -> None:
     Call this during graceful shutdown.
     """
     engine.dispose()
+
+
+def list_tables() -> list[str]:
+    """List all tables in the database.
+
+    Returns:
+        List of table names.
+    """
+    try:
+        with get_db_session() as db:
+            result = db.execute(
+                text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            )
+            return [row[0] for row in result.fetchall()]
+    except Exception as e:
+        print(f"Failed to list tables: {e}")
+        return []

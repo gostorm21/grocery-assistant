@@ -1,6 +1,7 @@
 """Main application entry point with FastAPI and Slack bot integration."""
 
 import logging
+import os
 import signal
 import sys
 import threading
@@ -10,7 +11,7 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 
 from .config import get_settings
-from .database import check_database_health, dispose_engine
+from .database import check_database_health, dispose_engine, list_tables
 from .slack_handler import start_slack_bot, stop_slack_bot
 
 # Configure logging
@@ -63,6 +64,15 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown."""
     # Startup
     logger.info("Starting Grocery Assistant...")
+
+    # Debug: Log DATABASE_URL status
+    db_url = os.environ.get("DATABASE_URL", "")
+    logger.info(f"=== DATABASE_URL set: {'YES' if db_url else 'NO'} ===")
+    logger.info(f"=== URL starts with: {db_url[:20]}... ===" if db_url else "=== URL is empty ===")
+
+    # Debug: List existing tables
+    tables = list_tables()
+    logger.info(f"=== Tables in database: {tables} ===")
 
     # Validate environment
     validate_environment()
