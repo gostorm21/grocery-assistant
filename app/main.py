@@ -70,6 +70,20 @@ async def lifespan(app: FastAPI):
     logger.info(f"=== DATABASE_URL set: {'YES' if db_url else 'NO'} ===")
     logger.info(f"=== URL starts with: {db_url[:20]}... ===" if db_url else "=== URL is empty ===")
 
+    # Run migrations from Python
+    logger.info("=== Running alembic migrations ===")
+    try:
+        from alembic.config import Config
+        from alembic import command
+        alembic_cfg = Config("alembic.ini")
+        # Override the database URL
+        if db_url:
+            alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+        command.upgrade(alembic_cfg, "head")
+        logger.info("=== Alembic migrations completed ===")
+    except Exception as e:
+        logger.error(f"=== Alembic migration FAILED: {e} ===")
+
     # Debug: List existing tables
     tables = list_tables()
     logger.info(f"=== Tables in database: {tables} ===")
