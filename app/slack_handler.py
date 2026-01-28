@@ -25,7 +25,7 @@ def get_user_name(slack_user_id: str) -> str | None:
     """Map Slack user ID to display name.
 
     Returns:
-        "Erich" or "L" if known user, None if unknown.
+        "Erich" or "Lauren" if known user, None if unknown.
     """
     return settings.user_mapping.get(slack_user_id)
 
@@ -43,7 +43,7 @@ def process_message(message_text: str, user_name: str, slack_user_id: str, messa
 
     Args:
         message_text: The user's message text.
-        user_name: Display name ("Erich" or "L").
+        user_name: Display name ("Erich" or "Lauren").
         slack_user_id: Raw Slack user ID.
         message_ts: Slack message timestamp for linking.
 

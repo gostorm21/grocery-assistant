@@ -8,6 +8,7 @@ import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import ValidationError
 
 from .config import get_settings
@@ -146,3 +147,61 @@ async def root():
         "status": "running",
         "version": "1.0.0",
     }
+
+
+# =============================================================================
+# Kroger OAuth Endpoints
+# =============================================================================
+
+
+@app.get("/kroger/auth")
+async def kroger_auth():
+    """Redirect to Kroger OAuth authorization page."""
+    try:
+        from .kroger_service import get_auth_url, is_configured
+
+        if not is_configured():
+            return {"error": "Kroger integration is not configured"}
+
+        auth_url = get_auth_url()
+        return RedirectResponse(url=auth_url)
+
+    except Exception as e:
+        logger.error(f"Kroger auth error: {e}")
+        return {"error": "Failed to generate Kroger auth URL"}
+
+
+@app.get("/kroger/callback")
+async def kroger_callback(code: str = None, error: str = None):
+    """Handle Kroger OAuth callback after user authorization."""
+    if error:
+        return HTMLResponse(
+            content=f"<h1>Authorization Failed</h1><p>Error: {error}</p>",
+            status_code=400,
+        )
+
+    if not code:
+        return HTMLResponse(
+            content="<h1>Authorization Failed</h1><p>No authorization code received.</p>",
+            status_code=400,
+        )
+
+    try:
+        from .kroger_service import exchange_auth_code
+
+        exchange_auth_code(code)
+        logger.info("Kroger OAuth callback: user authorized successfully")
+
+        return HTMLResponse(
+            content="<h1>Kroger Connected!</h1>"
+            "<p>Your Kroger account is now linked to the Grocery Assistant. "
+            "You can close this page and return to Slack.</p>",
+            status_code=200,
+        )
+
+    except Exception as e:
+        logger.error(f"Kroger OAuth callback error: {e}")
+        return HTMLResponse(
+            content=f"<h1>Authorization Failed</h1><p>Error exchanging code: {e}</p>",
+            status_code=500,
+        )

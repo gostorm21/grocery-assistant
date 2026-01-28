@@ -4,6 +4,15 @@ from pydantic_settings import BaseSettings
 from pydantic import field_validator
 
 
+# Fields that are optional (app works without them)
+OPTIONAL_FIELDS = {
+    "kroger_client_id",
+    "kroger_client_secret",
+    "kroger_redirect_uri",
+    "kroger_location_id",
+}
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -20,7 +29,13 @@ class Settings(BaseSettings):
 
     # User ID Mapping
     user_id_erich: str
-    user_id_l: str
+    user_id_lauren: str
+
+    # Kroger API (optional — app works without them)
+    kroger_client_id: str = ""
+    kroger_client_secret: str = ""
+    kroger_redirect_uri: str = ""
+    kroger_location_id: str = ""
 
     model_config = {
         "env_file": ".env",
@@ -31,6 +46,9 @@ class Settings(BaseSettings):
     @classmethod
     def check_not_empty(cls, v, info):
         """Validate that required environment variables are not empty."""
+        # Skip validation for optional fields
+        if info.field_name in OPTIONAL_FIELDS:
+            return v if v is not None else ""
         if v is None:
             raise ValueError(f"Required environment variable is not set")
         if isinstance(v, str) and v.strip() == "":
@@ -42,7 +60,7 @@ class Settings(BaseSettings):
         """Return mapping of Slack user IDs to display names."""
         return {
             self.user_id_erich: "Erich",
-            self.user_id_l: "L",
+            self.user_id_lauren: "Lauren",
         }
 
 
