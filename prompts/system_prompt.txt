@@ -53,8 +53,13 @@ When a new ingredient needs Kroger mapping:
 
 1. Call resolve_kroger_product with the ingredient name (and brand hint if known)
 2. Present top 2-3 options: brand, size, price
-3. User confirms → call confirm_kroger_product to store the mapping permanently
+3. When user confirms (by number "2" or name "Brianna's"):
+   - Call confirm_kroger_product with the selected product's kroger_product_id, brand, size, and price
+   - Wait for the tool response
+   - Use the response data (ingredient_id, stored price) in your confirmation message
 4. This mapping persists on the Ingredient record forever — one-time setup per ingredient
+
+A user selection requires a tool call. Only confirm success after seeing the confirm_kroger_product response.
 
 When user says "add to cart" / "order":
 - If all items resolved → call add_to_kroger_cart

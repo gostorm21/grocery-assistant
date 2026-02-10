@@ -304,9 +304,11 @@ def _do_search(
 
     url = f"{KROGER_API_BASE}/products"
 
-    # Debug logging
-    print(f"[KROGER SEARCH] URL: {url}", flush=True)
-    print(f"[KROGER SEARCH] Params: {params}", flush=True)
+    # Enhanced debug logging
+    print(f"[KROGER SEARCH] === NEW SEARCH ===", flush=True)
+    print(f"[KROGER SEARCH] Term: '{term}'", flush=True)
+    print(f"[KROGER SEARCH] Location: {location_id}", flush=True)
+    print(f"[KROGER SEARCH] Full URL: {url}?{urlencode(params)}", flush=True)
 
     response = requests.get(
         url,
@@ -316,12 +318,23 @@ def _do_search(
     )
 
     print(f"[KROGER SEARCH] Status: {response.status_code}", flush=True)
-    print(f"[KROGER SEARCH] Response: {response.text[:500]}", flush=True)
 
     response.raise_for_status()
 
     data = response.json()
     products = data.get("data", [])
+
+    # Log what we got back
+    print(f"[KROGER SEARCH] Results count: {len(products)}", flush=True)
+    if products:
+        # Show first result's category to debug category issues
+        first = products[0]
+        print(f"[KROGER SEARCH] First result: {first.get('description')}", flush=True)
+        print(f"[KROGER SEARCH] Categories: {first.get('categories', [])}", flush=True)
+        print(f"[KROGER SEARCH] Brand: {first.get('brand')}", flush=True)
+    else:
+        # Log full response when empty to see if there's an error message
+        print(f"[KROGER SEARCH] Empty response body: {response.text[:1000]}", flush=True)
 
     results = []
     for p in products:
