@@ -24,6 +24,8 @@ from .models import (
     Ingredient,
     RecipeIngredient,
     ShoppingListItem,
+    EventLog,
+    ActionType,
     normalize_recipe_name,
     normalize_ingredient_name,
 )
@@ -586,6 +588,26 @@ def _get_or_create_active_meal_plan(db_session: Session) -> MealPlan:
     return plan
 
 
+def _log_event(
+    db_session: Session,
+    action_type: ActionType,
+    input_summary: str,
+    output_summary: str,
+    related_ids: dict = None,
+) -> None:
+    """Record an EventLog entry for a write operation."""
+    try:
+        event = EventLog(
+            action_type=action_type,
+            input_summary=input_summary,
+            output_summary=output_summary,
+            related_ids=related_ids,
+        )
+        db_session.add(event)
+    except Exception as e:
+        print(f"[_log_event] Failed to log event: {e}", flush=True)
+
+
 # =============================================================================
 # Read Tool Handlers
 # =============================================================================
@@ -852,6 +874,7 @@ def execute_add_item(params: dict, db_session: Session, **kwargs) -> dict:
         db_session.flush()
 
         print(f"[add_item] SUCCESS: added '{ingredient.name}' (ingredient_id={ingredient.id}, item_id={item.id})", flush=True)
+        _log_event(db_session, ActionType.ADD_ITEM, f"name={name}, added_by={added_by}", f"item_id={item.id}", {"ingredient_id": ingredient.id, "item_id": item.id})
         return {
             "success": True,
             "item_id": item.id,
@@ -893,6 +916,7 @@ def execute_remove_item(params: dict, db_session: Session, **kwargs) -> dict:
         removed_name = item.ingredient.name
         db_session.delete(item)
         print(f"[remove_item] SUCCESS: removed '{removed_name}'", flush=True)
+        _log_event(db_session, ActionType.REMOVE_ITEM, f"name={name}", f"removed={removed_name}")
         return {"success": True, "removed": removed_name}
     except Exception as e:
         print(f"[remove_item] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -910,6 +934,7 @@ def execute_clear_list(params: dict, db_session: Session, **kwargs) -> dict:
             .delete()
         )
         print(f"[clear_list] SUCCESS: removed {count} items", flush=True)
+        _log_event(db_session, ActionType.CLEAR_LIST, "clear_list", f"removed={count}")
         return {"success": True, "items_removed": count}
     except Exception as e:
         print(f"[clear_list] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -940,6 +965,7 @@ def execute_finalize_order(params: dict, db_session: Session, **kwargs) -> dict:
         db_session.flush()
 
         print(f"[finalize_order] SUCCESS: archived {item_count} items, new list id={new_list.id}", flush=True)
+        _log_event(db_session, ActionType.FINALIZE_ORDER, f"items={item_count}", f"new_list_id={new_list.id}", {"new_list_id": new_list.id})
         return {"success": True, "items_ordered": item_count, "new_list_id": new_list.id}
     except Exception as e:
         print(f"[finalize_order] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -963,6 +989,7 @@ def execute_update_ingredient(params: dict, db_session: Session, **kwargs) -> di
         ingredient.updated_at = datetime.utcnow()
 
         print(f"[update_ingredient] SUCCESS: updated '{ingredient.name}' (id={ingredient.id})", flush=True)
+        _log_event(db_session, ActionType.UPDATE_INGREDIENT, f"name={name}", f"ingredient_id={ingredient.id}", {"ingredient_id": ingredient.id})
         return {
             "success": True,
             "ingredient_id": ingredient.id,
@@ -1022,6 +1049,7 @@ def execute_add_recipe_note(params: dict, db_session: Session, **kwargs) -> dict
         db_session.flush()
 
         print(f"[add_recipe_note] SUCCESS: note id={note.id} for '{recipe_name}'", flush=True)
+        _log_event(db_session, ActionType.ADD_RECIPE_NOTE, f"recipe={recipe_name}, user={user}", f"note_id={note.id}", {"note_id": note.id})
         return {"success": True, "note_id": note.id, "recipe_name": recipe_name}
     except Exception as e:
         print(f"[add_recipe_note] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1076,6 +1104,7 @@ def execute_add_recipe(params: dict, db_session: Session, **kwargs) -> dict:
         unmapped = [i for i in new_ingredients if not i["has_kroger_mapping"]]
 
         print(f"[add_recipe] SUCCESS: recipe id={recipe.id}, {len(new_ingredients)} ingredients, {len(unmapped)} unmapped", flush=True)
+        _log_event(db_session, ActionType.ADD_RECIPE, f"name={name}, ingredients={len(new_ingredients)}", f"recipe_id={recipe.id}", {"recipe_id": recipe.id})
         return {
             "success": True,
             "recipe_id": recipe.id,
@@ -1114,6 +1143,7 @@ def execute_add_meal(params: dict, db_session: Session, **kwargs) -> dict:
         plan.meals = plan.meals + [meal_entry]
 
         print(f"[add_meal] SUCCESS: added '{meal_entry['meal_name']}' to plan {plan.id}", flush=True)
+        _log_event(db_session, ActionType.ADD_MEAL, f"meal={meal_entry['meal_name']}", f"plan_id={plan.id}", {"plan_id": plan.id})
         return {"success": True, "meal_name": meal_entry["meal_name"], "plan_id": plan.id}
     except Exception as e:
         print(f"[add_meal] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1142,6 +1172,7 @@ def execute_remove_meal(params: dict, db_session: Session, **kwargs) -> dict:
 
         plan.meals = remaining
         print(f"[remove_meal] SUCCESS: removed '{params['meal_name']}'", flush=True)
+        _log_event(db_session, ActionType.REMOVE_MEAL, f"meal={params['meal_name']}", "removed")
         return {"success": True, "removed": params["meal_name"]}
     except Exception as e:
         print(f"[remove_meal] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1217,6 +1248,7 @@ def execute_generate_list_from_meals(params: dict, db_session: Session, **kwargs
                 items_added += 1
 
         print(f"[generate_list_from_meals] SUCCESS: added {items_added}, skipped {len(skipped_existing)} existing, {len(skipped_pantry)} pantry", flush=True)
+        _log_event(db_session, ActionType.GENERATE_LIST, f"meals={len(plan.meals)}", f"added={items_added}")
         return {
             "success": True,
             "items_added": items_added,
@@ -1244,6 +1276,7 @@ def execute_complete_meal_plan(params: dict, db_session: Session, **kwargs) -> d
         plan.status = MealPlanStatus.COMPLETED
         plan.updated_at = datetime.utcnow()
         print(f"[complete_meal_plan] SUCCESS: completed plan {plan.id}", flush=True)
+        _log_event(db_session, ActionType.COMPLETE_MEAL_PLAN, f"plan_id={plan.id}", "completed", {"plan_id": plan.id})
         return {"success": True, "plan_id": plan.id}
     except Exception as e:
         print(f"[complete_meal_plan] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1280,6 +1313,7 @@ def execute_update_preference(params: dict, db_session: Session, **kwargs) -> di
         pref.updated_at = datetime.utcnow()
 
         print(f"[update_preference] SUCCESS: {user}.{category} = {value}", flush=True)
+        _log_event(db_session, ActionType.UPDATE_PREFERENCE, f"{user}.{category}={value}", "updated")
         return {"success": True, "user": user, "category": category, "value": value}
     except Exception as e:
         print(f"[update_preference] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1317,11 +1351,13 @@ def execute_add_pantry_item(params: dict, db_session: Session, **kwargs) -> dict
                 existing.unit = unit
             existing.updated_at = datetime.utcnow()
             print(f"[add_pantry_item] SUCCESS: updated '{item_name}'", flush=True)
+            _log_event(db_session, ActionType.ADD_PANTRY_ITEM, f"name={item_name}", "updated")
             return {"success": True, "item_name": item_name, "action": "updated"}
         else:
             new_item = PantryItem(item_name=item_name, quantity=quantity, unit=unit)
             db_session.add(new_item)
             print(f"[add_pantry_item] SUCCESS: added '{item_name}'", flush=True)
+            _log_event(db_session, ActionType.ADD_PANTRY_ITEM, f"name={item_name}", "added")
             return {"success": True, "item_name": item_name, "action": "added"}
     except Exception as e:
         print(f"[add_pantry_item] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1353,6 +1389,7 @@ def execute_update_pantry_item(params: dict, db_session: Session, **kwargs) -> d
 
         existing.updated_at = datetime.utcnow()
         print(f"[update_pantry_item] SUCCESS: updated '{item_name}'", flush=True)
+        _log_event(db_session, ActionType.UPDATE_PANTRY_ITEM, f"name={item_name}", "updated")
         return {"success": True, "item_name": item_name}
     except Exception as e:
         print(f"[update_pantry_item] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1375,6 +1412,7 @@ def execute_remove_pantry_item(params: dict, db_session: Session, **kwargs) -> d
 
         db_session.delete(existing)
         print(f"[remove_pantry_item] SUCCESS: removed '{item_name}'", flush=True)
+        _log_event(db_session, ActionType.REMOVE_PANTRY_ITEM, f"name={item_name}", "removed")
         return {"success": True, "removed": item_name}
     except Exception as e:
         print(f"[remove_pantry_item] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1395,6 +1433,7 @@ def execute_resolve_kroger_product(params: dict, db_session: Session, **kwargs) 
 
         results = search_products(ingredient_name, brand=brand_hint, limit=5)
         print(f"[resolve_kroger_product] SUCCESS: {len(results)} results for '{ingredient_name}'", flush=True)
+        _log_event(db_session, ActionType.RESOLVE_KROGER, f"ingredient={ingredient_name}", f"results={len(results)}")
         return {"results": results, "ingredient_name": ingredient_name}
     except Exception as e:
         print(f"[resolve_kroger_product] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1419,6 +1458,7 @@ def execute_confirm_kroger_product(params: dict, db_session: Session, **kwargs) 
         ingredient.updated_at = datetime.utcnow()
 
         print(f"[confirm_kroger_product] SUCCESS: '{ingredient.name}' -> {kroger_product_id}", flush=True)
+        _log_event(db_session, ActionType.CONFIRM_KROGER, f"ingredient={ingredient_name}, product={kroger_product_id}", f"ingredient_id={ingredient.id}", {"ingredient_id": ingredient.id})
         return {
             "success": True,
             "ingredient_id": ingredient.id,
@@ -1475,6 +1515,7 @@ def execute_add_to_kroger_cart(params: dict, db_session: Session, **kwargs) -> d
         success = add_items_to_cart(resolved)
         if success:
             print(f"[add_to_kroger_cart] SUCCESS: {len(resolved)} items", flush=True)
+            _log_event(db_session, ActionType.ADD_TO_CART, f"items={len(resolved)}", "success")
             return {"success": True, "items_added": len(resolved)}
         else:
             return {"error": "Failed to add items to Kroger cart."}
@@ -1507,6 +1548,7 @@ def execute_check_off_item(params: dict, db_session: Session, **kwargs) -> dict:
         item.checked_off = not item.checked_off
         status = "checked off" if item.checked_off else "unchecked"
         print(f"[check_off_item] SUCCESS: '{item.ingredient.name}' {status}", flush=True)
+        _log_event(db_session, ActionType.CHECK_OFF_ITEM, f"name={name}", status)
         return {"success": True, "name": item.ingredient.name, "checked_off": item.checked_off}
     except Exception as e:
         print(f"[check_off_item] FAILED: {type(e).__name__}: {e}", flush=True)
