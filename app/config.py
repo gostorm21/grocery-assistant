@@ -37,17 +37,35 @@ class Settings(BaseSettings):
     kroger_redirect_uri: str = ""
     kroger_location_id: str = ""
 
+    # Agentic Loop Settings
+    max_tool_turns: int = 15
+    status_checkpoint_turn: int = 10
+    enable_prompt_caching: bool = True
+    user_timezone: str = "America/Denver"
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
     }
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def fix_database_url(cls, v):
+        """Railway uses postgres:// but SQLAlchemy requires postgresql://."""
+        if isinstance(v, str) and v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql://", 1)
+        return v
+
     @field_validator("*", mode="before")
     @classmethod
     def check_not_empty(cls, v, info):
         """Validate that required environment variables are not empty."""
-        # Skip validation for optional fields
-        if info.field_name in OPTIONAL_FIELDS:
+        # Skip validation for optional fields and fields with defaults
+        optional_with_defaults = OPTIONAL_FIELDS | {
+            "max_tool_turns", "status_checkpoint_turn",
+            "enable_prompt_caching", "user_timezone",
+        }
+        if info.field_name in optional_with_defaults:
             return v if v is not None else ""
         if v is None:
             raise ValueError(f"Required environment variable is not set")
