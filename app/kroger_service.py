@@ -1,7 +1,7 @@
 """Kroger API client for product search and cart management.
 
 Handles OAuth2 authentication (client credentials for search, user auth for cart),
-product search, and cart operations.
+product search, and cart operations. Tokens are persisted to database to survive restarts.
 """
 
 import logging
@@ -24,6 +24,65 @@ _client_token_expiry: float = 0
 _user_token: str | None = None
 _user_refresh_token: str | None = None
 _user_token_expiry: float = 0
+
+
+# =============================================================================
+# Database Token Persistence
+# =============================================================================
+
+
+def _load_tokens_from_db() -> None:
+    """Load user tokens from database on startup."""
+    global _user_token, _user_refresh_token, _user_token_expiry
+
+    try:
+        from .database import get_db_session
+        from .models import KrogerToken
+
+        with get_db_session() as db_session:
+            token_row = db_session.query(KrogerToken).first()
+            if token_row and token_row.refresh_token:
+                _user_token = token_row.access_token
+                _user_refresh_token = token_row.refresh_token
+                _user_token_expiry = token_row.token_expiry or 0
+                print(f"[KROGER] Loaded tokens from database (expiry={_user_token_expiry})", flush=True)
+            else:
+                print("[KROGER] No saved tokens in database", flush=True)
+    except Exception as e:
+        print(f"[KROGER] Failed to load tokens from DB: {e}", flush=True)
+
+
+def _save_tokens_to_db() -> None:
+    """Save current user tokens to database."""
+    try:
+        from .database import get_db_session
+        from .models import KrogerToken
+
+        with get_db_session() as db_session:
+            token_row = db_session.query(KrogerToken).first()
+            if not token_row:
+                token_row = KrogerToken()
+                db_session.add(token_row)
+
+            token_row.access_token = _user_token
+            token_row.refresh_token = _user_refresh_token
+            token_row.token_expiry = _user_token_expiry
+            db_session.commit()
+            print("[KROGER] Saved tokens to database", flush=True)
+    except Exception as e:
+        print(f"[KROGER] Failed to save tokens to DB: {e}", flush=True)
+
+
+# Load tokens from DB on module import (after tables exist)
+try:
+    _load_tokens_from_db()
+except Exception:
+    pass  # Tables may not exist yet during migration
+
+
+# =============================================================================
+# Configuration & Status
+# =============================================================================
 
 
 def is_configured() -> bool:
@@ -54,7 +113,6 @@ def is_user_authenticated() -> bool:
     if not _user_token:
         return False
     if time.time() >= _user_token_expiry:
-        # Try to refresh
         try:
             _refresh_user_token()
             return _user_token is not None
@@ -69,17 +127,9 @@ def is_user_authenticated() -> bool:
 
 
 def _get_client_credentials_token() -> str:
-    """Get a client credentials token for product search (no user auth needed).
-
-    Returns:
-        Access token string.
-
-    Raises:
-        Exception: If token request fails.
-    """
+    """Get a client credentials token for product search (no user auth needed)."""
     global _client_token, _client_token_expiry
 
-    # Return cached token if still valid
     if _client_token and time.time() < _client_token_expiry:
         return _client_token
 
@@ -98,7 +148,6 @@ def _get_client_credentials_token() -> str:
 
     token_data = response.json()
     _client_token = token_data["access_token"]
-    # Expire 60 seconds early to avoid edge cases
     _client_token_expiry = time.time() + token_data.get("expires_in", 1800) - 60
 
     logger.info("Obtained Kroger client credentials token")
@@ -106,11 +155,7 @@ def _get_client_credentials_token() -> str:
 
 
 def _get_user_token() -> str | None:
-    """Get the current user OAuth token for cart operations.
-
-    Returns:
-        Access token string, or None if not authenticated.
-    """
+    """Get the current user OAuth token for cart operations."""
     global _user_token, _user_token_expiry
 
     if not _user_token:
@@ -150,6 +195,7 @@ def _refresh_user_token() -> None:
         _user_token_expiry = time.time() + token_data.get("expires_in", 1800) - 60
 
         logger.info("Refreshed Kroger user token")
+        _save_tokens_to_db()
 
     except Exception as e:
         logger.error(f"Failed to refresh Kroger user token: {e}")
@@ -163,11 +209,7 @@ def _refresh_user_token() -> None:
 
 
 def get_auth_url() -> str:
-    """Generate the Kroger OAuth authorization URL.
-
-    Returns:
-        URL string to redirect user to for authorization.
-    """
+    """Generate the Kroger OAuth authorization URL."""
     settings = get_settings()
 
     params = {
@@ -181,17 +223,7 @@ def get_auth_url() -> str:
 
 
 def exchange_auth_code(code: str) -> dict:
-    """Exchange an authorization code for access and refresh tokens.
-
-    Args:
-        code: The authorization code from the OAuth callback.
-
-    Returns:
-        Dict with access_token, refresh_token, expires_in.
-
-    Raises:
-        Exception: If token exchange fails.
-    """
+    """Exchange an authorization code for access and refresh tokens."""
     global _user_token, _user_refresh_token, _user_token_expiry
 
     settings = get_settings()
@@ -214,6 +246,7 @@ def exchange_auth_code(code: str) -> dict:
     _user_token_expiry = time.time() + token_data.get("expires_in", 1800) - 60
 
     logger.info("Exchanged Kroger auth code for user tokens")
+    _save_tokens_to_db()
     return token_data
 
 
@@ -223,16 +256,7 @@ def exchange_auth_code(code: str) -> dict:
 
 
 def search_products(term: str, brand: str = None, limit: int = 5) -> list[dict]:
-    """Search for products in the Kroger catalog.
-
-    Args:
-        term: Search term (e.g., "milk", "organic eggs").
-        brand: Optional brand filter.
-        limit: Maximum number of results.
-
-    Returns:
-        List of product dicts with: productId, description, brand, size, price.
-    """
+    """Search for products in the Kroger catalog."""
     token = _get_client_credentials_token()
 
     params = {
@@ -266,12 +290,9 @@ def search_products(term: str, brand: str = None, limit: int = 5) -> list[dict]:
             "brand": p.get("brand", ""),
         }
 
-        # Extract size from items
         items = p.get("items", [])
         if items:
             product["size"] = items[0].get("size", "")
-
-            # Extract price
             price_info = items[0].get("price", {})
             if price_info:
                 product["price"] = price_info.get("regular", price_info.get("promo"))
@@ -290,20 +311,12 @@ def search_products(term: str, brand: str = None, limit: int = 5) -> list[dict]:
 
 
 def add_items_to_cart(items: list[dict]) -> bool:
-    """Add items to the user's Kroger cart.
-
-    Args:
-        items: List of dicts with "upc" and "quantity" keys.
-
-    Returns:
-        True if successful, False otherwise.
-    """
+    """Add items to the user's Kroger cart."""
     token = _get_user_token()
     if not token:
         logger.error("No user token available for cart operations")
         return False
 
-    # Kroger cart API expects items in a specific format
     cart_items = [
         {"upc": item["upc"], "quantity": item.get("quantity", 1)}
         for item in items
