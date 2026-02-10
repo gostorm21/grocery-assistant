@@ -7,22 +7,27 @@ from .base import Base, TimestampMixin
 
 
 class Recipe(Base, TimestampMixin):
-    """Model for storing recipes."""
+    """Model for storing recipes.
+
+    Ingredients are stored in the RecipeIngredient junction table (v2 schema).
+    """
 
     __tablename__ = "recipes"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    ingredients: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
     cuisine: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
-    # Relationship to recipe notes
+    # Relationships
     notes: Mapped[list["RecipeNote"]] = relationship(
         "RecipeNote", back_populates="recipe"
+    )
+    recipe_ingredients: Mapped[list["RecipeIngredient"]] = relationship(
+        "RecipeIngredient", back_populates="recipe"
     )
 
     def __repr__(self) -> str:

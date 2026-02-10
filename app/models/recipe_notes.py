@@ -27,11 +27,7 @@ class NoteOutcome(enum.Enum):
 
 
 class RecipeNote(Base):
-    """Model for storing recipe notes and cooking feedback.
-
-    In Phase 1, recipe_name is used for matching (recipe_id will be
-    linked in Phase 2 when full recipe management is implemented).
-    """
+    """Model for storing recipe notes and cooking feedback."""
 
     __tablename__ = "recipe_notes"
 
@@ -41,6 +37,7 @@ class RecipeNote(Base):
     )
     recipe_name: Mapped[str] = mapped_column(String(255), nullable=False)
     recipe_name_normalized: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     user: Mapped[str] = mapped_column(String(50), nullable=False)
     note_text: Mapped[str] = mapped_column(Text, nullable=False)
     note_type: Mapped[NoteType] = mapped_column(
@@ -53,7 +50,7 @@ class RecipeNote(Base):
         DateTime, default=datetime.utcnow, nullable=False
     )
 
-    # Relationship to recipe (optional in Phase 1)
+    # Relationship to recipe
     recipe: Mapped["Recipe"] = relationship("Recipe", back_populates="notes")
 
     def __init__(self, **kwargs):
