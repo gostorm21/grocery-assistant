@@ -72,7 +72,7 @@ def classify_grocery_message(user_message: str) -> dict:
         classifier_prompt = load_classifier_prompt()
 
         response = client.messages.create(
-            model="claude-haiku-4-20250414",
+            model="claude-haiku-4-5-20251001",
             max_tokens=200,
             timeout=5.0,
             system=classifier_prompt,
@@ -687,7 +687,7 @@ def get_claude_response(
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5-20250929",
             max_tokens=2000,
             timeout=30.0,  # 30 second timeout
             system=system_prompt,
