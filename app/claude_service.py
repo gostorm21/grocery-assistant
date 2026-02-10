@@ -102,7 +102,7 @@ def get_recent_messages(db_session: Session, limit: int = 5) -> list[dict]:
         {
             "user": m.user,
             "message": m.message,
-            "response": m.response[:200] + "..." if m.response and len(m.response) > 200 else m.response,
+            "response": m.response[:800] + "..." if m.response and len(m.response) > 800 else m.response,
             "timestamp": m.timestamp.isoformat() if m.timestamp else None,
         }
         for m in messages
