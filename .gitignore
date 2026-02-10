@@ -91,3 +91,4 @@ dmypy.json
 
 # Project specific
 *.log
+CLAUDE.md
