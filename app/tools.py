@@ -1553,6 +1553,16 @@ def execute_resolve_kroger_product(params: dict, db_session: Session, **kwargs) 
         ingredient_name = params["ingredient_name"].strip()
         brand_hint = (params.get("brand_hint") or "").strip() or None
 
+        # Filter out common non-brand words that Claude sometimes passes as brand hints
+        # These are product attributes, not actual brands
+        non_brand_words = {
+            "organic", "fresh", "frozen", "dried", "canned", "whole", "raw",
+            "natural", "pure", "low", "fat", "free", "reduced", "light",
+        }
+        if brand_hint and brand_hint.lower() in non_brand_words:
+            print(f"[resolve_kroger_product] Filtering out non-brand hint: '{brand_hint}'", flush=True)
+            brand_hint = None
+
         results = search_products(ingredient_name, brand=brand_hint, limit=5)
         print(f"[resolve_kroger_product] SUCCESS: {len(results)} results for '{ingredient_name}'", flush=True)
         _log_event(db_session, ActionType.RESOLVE_KROGER, f"ingredient={ingredient_name}", f"results={len(results)}")
