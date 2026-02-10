@@ -38,6 +38,8 @@ class Ingredient(Base, TimestampMixin):
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
     last_known_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     aliases: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    purchase_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Values: null (default = Kroger), "sprouts", "liquor_store", "other"
 
     # Relationships
     recipe_ingredients: Mapped[list["RecipeIngredient"]] = relationship(

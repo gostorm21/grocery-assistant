@@ -623,6 +623,33 @@ TOOL_DEFINITIONS = [
             "required": ["ingredient_name", "alias"],
         },
     },
+    {
+        "name": "set_purchase_source",
+        "description": "Mark an ingredient as purchased from a specific store (not Kroger). Use for items from Sprouts, liquor store, Costco, farmer's market, etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ingredient_name": {
+                    "type": "string",
+                    "description": "The ingredient name.",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Where to purchase: 'sprouts', 'liquor_store', 'costco', 'farmers_market', 'other', or null to reset to Kroger.",
+                },
+            },
+            "required": ["ingredient_name", "source"],
+        },
+    },
+    {
+        "name": "get_non_kroger_items",
+        "description": "Get shopping list items that need to be purchased elsewhere (not from Kroger). Groups by purchase source.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 
@@ -799,6 +826,7 @@ def execute_get_shopping_list(params: dict, db_session: Session, **kwargs) -> di
             "preferred_brand": ing.preferred_brand,
             "kroger_product_id": ing.kroger_product_id,
             "from_recipe_id": item.from_recipe_id,
+            "purchase_source": ing.purchase_source,
         })
 
     print(f"[get_shopping_list] SUCCESS: {len(result_items)} items", flush=True)
@@ -1038,6 +1066,11 @@ def execute_add_item(params: dict, db_session: Session, **kwargs) -> dict:
             "preferred_brand": ingredient.preferred_brand,
             "kroger_product_id": ingredient.kroger_product_id,
             "has_kroger_mapping": ingredient.kroger_product_id is not None,
+            "purchase_source": ingredient.purchase_source,
+            "needs_kroger_resolution": (
+                ingredient.kroger_product_id is None
+                and ingredient.purchase_source is None  # Don't resolve non-Kroger items
+            ),
         }
     except Exception as e:
         print(f"[add_item] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1674,7 +1707,15 @@ def execute_add_to_kroger_cart(params: dict, db_session: Session, **kwargs) -> d
 
         resolved = []
         unresolved = []
+        skipped_non_kroger = []
         for item in items:
+            # Skip non-Kroger items (they have a purchase_source set)
+            if item.ingredient.purchase_source:
+                skipped_non_kroger.append({
+                    "name": item.ingredient.name,
+                    "source": item.ingredient.purchase_source,
+                })
+                continue
             if item.ingredient.kroger_product_id:
                 resolved.append({
                     "upc": item.ingredient.kroger_product_id,
@@ -1692,9 +1733,12 @@ def execute_add_to_kroger_cart(params: dict, db_session: Session, **kwargs) -> d
 
         success = add_items_to_cart(resolved)
         if success:
-            print(f"[add_to_kroger_cart] SUCCESS: {len(resolved)} items", flush=True)
+            print(f"[add_to_kroger_cart] SUCCESS: {len(resolved)} items, skipped {len(skipped_non_kroger)} non-Kroger", flush=True)
             _log_event(db_session, ActionType.ADD_TO_CART, f"items={len(resolved)}", "success")
-            return {"success": True, "items_added": len(resolved)}
+            result = {"success": True, "items_added": len(resolved)}
+            if skipped_non_kroger:
+                result["skipped_non_kroger"] = skipped_non_kroger
+            return result
         else:
             return {"error": "Failed to add items to Kroger cart."}
     except Exception as e:
@@ -2076,6 +2120,88 @@ def execute_set_ingredient_alias(params: dict, db_session: Session, **kwargs) ->
         return {"error": f"Failed to set alias: {str(e)}"}
 
 
+def execute_set_purchase_source(params: dict, db_session: Session, **kwargs) -> dict:
+    """Set where an ingredient should be purchased (non-Kroger source)."""
+    print(f"[set_purchase_source] Called: {params.get('ingredient_name')} -> {params.get('source')}", flush=True)
+    try:
+        ingredient_name = params["ingredient_name"].strip()
+        source = params.get("source")
+
+        # Normalize source value
+        if source:
+            source = source.strip().lower()
+            if source in ("null", "none", "kroger", ""):
+                source = None
+
+        # Find or create the ingredient
+        ingredient = _get_or_create_ingredient(ingredient_name, db_session)
+        ingredient.purchase_source = source
+        ingredient.updated_at = datetime.utcnow()
+
+        source_display = source if source else "Kroger (default)"
+        print(f"[set_purchase_source] SUCCESS: '{ingredient.name}' -> {source_display}", flush=True)
+        _log_event(db_session, ActionType.UPDATE_INGREDIENT, f"ingredient={ingredient_name}, source={source}", f"ingredient_id={ingredient.id}", {"ingredient_id": ingredient.id})
+        return {
+            "success": True,
+            "ingredient_name": ingredient.name,
+            "purchase_source": source,
+            "message": f"'{ingredient.name}' will now be purchased from {source_display}.",
+        }
+    except Exception as e:
+        print(f"[set_purchase_source] FAILED: {type(e).__name__}: {e}", flush=True)
+        return {"error": f"Failed to set purchase source: {str(e)}"}
+
+
+def execute_get_non_kroger_items(params: dict, db_session: Session, **kwargs) -> dict:
+    """Get shopping list items that need to be purchased elsewhere."""
+    print("[get_non_kroger_items] Called", flush=True)
+    try:
+        active_list = (
+            db_session.query(ShoppingList)
+            .filter(ShoppingList.status == ShoppingListStatus.ACTIVE)
+            .first()
+        )
+        if not active_list:
+            return {"items": [], "by_source": {}}
+
+        items = (
+            db_session.query(ShoppingListItem)
+            .join(Ingredient)
+            .filter(
+                ShoppingListItem.shopping_list_id == active_list.id,
+                Ingredient.purchase_source.isnot(None),
+            )
+            .all()
+        )
+
+        # Group by source
+        by_source = {}
+        result_items = []
+        for item in items:
+            ing = item.ingredient
+            source = ing.purchase_source
+            if source not in by_source:
+                by_source[source] = []
+            item_data = {
+                "name": ing.name,
+                "quantity": item.quantity,
+                "unit": item.unit,
+                "purchase_source": source,
+            }
+            by_source[source].append(item_data)
+            result_items.append(item_data)
+
+        print(f"[get_non_kroger_items] SUCCESS: {len(result_items)} items across {len(by_source)} sources", flush=True)
+        return {
+            "items": result_items,
+            "by_source": by_source,
+            "total_count": len(result_items),
+        }
+    except Exception as e:
+        print(f"[get_non_kroger_items] FAILED: {type(e).__name__}: {e}", flush=True)
+        return {"error": f"Failed to get non-Kroger items: {str(e)}"}
+
+
 # =============================================================================
 # Tool Dispatcher
 # =============================================================================
@@ -2115,6 +2241,8 @@ TOOL_HANDLERS = {
     "match_purchases_to_ingredients": execute_match_purchases_to_ingredients,
     "update_recipe": execute_update_recipe,
     "set_ingredient_alias": execute_set_ingredient_alias,
+    "set_purchase_source": execute_set_purchase_source,
+    "get_non_kroger_items": execute_get_non_kroger_items,
 }
 
 
