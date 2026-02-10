@@ -466,7 +466,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "confirm_kroger_product",
-        "description": "Confirm a Kroger product match for an ingredient. Stores the kroger_product_id, brand, and size on the Ingredient record permanently.",
+        "description": "Confirm a Kroger product match for an ingredient. Stores the kroger_product_id, brand, size, and price on the Ingredient record permanently.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -485,6 +485,10 @@ TOOL_DEFINITIONS = [
                 "size": {
                     "type": "string",
                     "description": "Product size description.",
+                },
+                "price": {
+                    "type": "number",
+                    "description": "Product price. IMPORTANT: Always pass this from the search results.",
                 },
             },
             "required": ["ingredient_name", "kroger_product_id"],
@@ -601,6 +605,24 @@ TOOL_DEFINITIONS = [
             "required": ["recipe_name"],
         },
     },
+    {
+        "name": "set_ingredient_alias",
+        "description": "Add a shorthand alias for an ingredient. Use this when you learn a user's shorthand (e.g., 'dishwasher pods' = 'Simple Truth Dishwasher Detergent Pods'). Future lookups will match the alias.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ingredient_name": {
+                    "type": "string",
+                    "description": "The full/canonical ingredient name.",
+                },
+                "alias": {
+                    "type": "string",
+                    "description": "The shorthand alias to add.",
+                },
+            },
+            "required": ["ingredient_name", "alias"],
+        },
+    },
 ]
 
 
@@ -615,13 +637,27 @@ def get_tool_definitions() -> list:
 
 
 def _get_or_create_ingredient(name: str, db_session: Session) -> Ingredient:
-    """Find existing ingredient by normalized name, or create new one."""
+    """Find existing ingredient by normalized name or alias, or create new one."""
     normalized = normalize_ingredient_name(name)
+
+    # First check exact normalized_name match
     ingredient = (
         db_session.query(Ingredient)
         .filter(Ingredient.normalized_name == normalized)
         .first()
     )
+
+    # If not found, check aliases
+    if not ingredient:
+        # Query for ingredients where aliases JSON array contains this normalized name
+        all_ingredients = db_session.query(Ingredient).filter(Ingredient.aliases.isnot(None)).all()
+        for ing in all_ingredients:
+            if ing.aliases and normalized in [normalize_ingredient_name(a) for a in ing.aliases]:
+                ingredient = ing
+                print(f"[_get_or_create_ingredient] Matched alias '{name}' to '{ing.name}'", flush=True)
+                break
+
+    # If still not found, create new
     if not ingredient:
         ingredient = Ingredient(
             name=name,
@@ -629,6 +665,7 @@ def _get_or_create_ingredient(name: str, db_session: Session) -> Ingredient:
         )
         db_session.add(ingredient)
         db_session.flush()
+
     return ingredient
 
 
@@ -1580,6 +1617,7 @@ def execute_confirm_kroger_product(params: dict, db_session: Session, **kwargs) 
         kroger_product_id = params["kroger_product_id"].strip()
         brand = (params.get("brand") or "").strip() or None
         size = (params.get("size") or "").strip() or None
+        price = params.get("price")
 
         ingredient = _get_or_create_ingredient(ingredient_name, db_session)
         ingredient.kroger_product_id = kroger_product_id
@@ -1587,15 +1625,23 @@ def execute_confirm_kroger_product(params: dict, db_session: Session, **kwargs) 
             ingredient.preferred_brand = brand
         if size:
             ingredient.preferred_size = size
+        if price is not None:
+            try:
+                ingredient.last_known_price = float(price)
+            except (ValueError, TypeError):
+                pass
         ingredient.updated_at = datetime.utcnow()
 
-        print(f"[confirm_kroger_product] SUCCESS: '{ingredient.name}' -> {kroger_product_id}", flush=True)
+        print(f"[confirm_kroger_product] SUCCESS: '{ingredient.name}' -> {kroger_product_id} @ ${ingredient.last_known_price}", flush=True)
         _log_event(db_session, ActionType.CONFIRM_KROGER, f"ingredient={ingredient_name}, product={kroger_product_id}", f"ingredient_id={ingredient.id}", {"ingredient_id": ingredient.id})
         return {
             "success": True,
             "ingredient_id": ingredient.id,
             "name": ingredient.name,
             "kroger_product_id": kroger_product_id,
+            "brand": ingredient.preferred_brand,
+            "size": ingredient.preferred_size,
+            "price": ingredient.last_known_price,
         }
     except Exception as e:
         print(f"[confirm_kroger_product] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1986,6 +2032,50 @@ def execute_update_recipe(params: dict, db_session: Session, **kwargs) -> dict:
         return {"error": f"Failed to update recipe: {str(e)}"}
 
 
+def execute_set_ingredient_alias(params: dict, db_session: Session, **kwargs) -> dict:
+    """Add an alias for an ingredient."""
+    print(f"[set_ingredient_alias] Called: {params.get('ingredient_name')} -> {params.get('alias')}", flush=True)
+    try:
+        ingredient_name = params["ingredient_name"].strip()
+        alias = params["alias"].strip()
+
+        if not alias:
+            return {"error": "Alias cannot be empty."}
+
+        # Find the ingredient
+        normalized = normalize_ingredient_name(ingredient_name)
+        ingredient = (
+            db_session.query(Ingredient)
+            .filter(Ingredient.normalized_name == normalized)
+            .first()
+        )
+
+        if not ingredient:
+            return {"error": f"Ingredient '{ingredient_name}' not found. Add it first before setting aliases."}
+
+        # Add alias to the list
+        normalized_alias = normalize_ingredient_name(alias)
+        current_aliases = ingredient.aliases or []
+
+        if normalized_alias in [normalize_ingredient_name(a) for a in current_aliases]:
+            return {"message": f"Alias '{alias}' already exists for '{ingredient.name}'.", "ingredient_name": ingredient.name}
+
+        current_aliases.append(alias)
+        ingredient.aliases = current_aliases
+        ingredient.updated_at = datetime.utcnow()
+
+        print(f"[set_ingredient_alias] SUCCESS: '{alias}' -> '{ingredient.name}'", flush=True)
+        return {
+            "success": True,
+            "ingredient_name": ingredient.name,
+            "alias_added": alias,
+            "all_aliases": ingredient.aliases,
+        }
+    except Exception as e:
+        print(f"[set_ingredient_alias] FAILED: {type(e).__name__}: {e}", flush=True)
+        return {"error": f"Failed to set alias: {str(e)}"}
+
+
 # =============================================================================
 # Tool Dispatcher
 # =============================================================================
@@ -2024,6 +2114,7 @@ TOOL_HANDLERS = {
     "import_recipes_batch": execute_import_recipes_batch,
     "match_purchases_to_ingredients": execute_match_purchases_to_ingredients,
     "update_recipe": execute_update_recipe,
+    "set_ingredient_alias": execute_set_ingredient_alias,
 }
 
 

@@ -3,7 +3,7 @@
 import re
 from datetime import datetime
 
-from sqlalchemy import Integer, String, Float, Boolean, DateTime, ForeignKey
+from sqlalchemy import Integer, String, Float, Boolean, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin
@@ -36,6 +36,8 @@ class Ingredient(Base, TimestampMixin):
     preferred_brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
     preferred_size: Mapped[str | None] = mapped_column(String(255), nullable=True)
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    last_known_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    aliases: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     # Relationships
     recipe_ingredients: Mapped[list["RecipeIngredient"]] = relationship(
