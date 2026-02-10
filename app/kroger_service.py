@@ -213,7 +213,7 @@ def get_auth_url() -> str:
     settings = get_settings()
 
     params = {
-        "scope": "cart.basic:write product.compact",
+        "scope": "cart.basic:write product.compact profile.compact",
         "response_type": "code",
         "client_id": settings.kroger_client_id,
         "redirect_uri": settings.kroger_redirect_uri,
@@ -255,8 +255,40 @@ def exchange_auth_code(code: str) -> dict:
 # =============================================================================
 
 
-def search_products(term: str, brand: str = None, limit: int = 5) -> list[dict]:
-    """Search for products in the Kroger catalog."""
+def _simplify_search_term(term: str) -> str:
+    """Simplify search term by removing common prefixes that may interfere with search.
+
+    Strips words like 'organic', 'fresh', 'frozen' that may limit results.
+    """
+    prefixes_to_strip = [
+        "organic",
+        "fresh",
+        "frozen",
+        "dried",
+        "canned",
+        "whole",
+        "raw",
+        "natural",
+        "pure",
+    ]
+
+    words = term.lower().split()
+    filtered = [w for w in words if w not in prefixes_to_strip]
+
+    # Return original if all words were stripped
+    if not filtered:
+        return term
+
+    return " ".join(filtered)
+
+
+def _do_search(
+    term: str,
+    brand: str = None,
+    location_id: str = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Execute a single Kroger product search with given parameters."""
     token = _get_client_credentials_token()
 
     params = {
@@ -267,16 +299,25 @@ def search_products(term: str, brand: str = None, limit: int = 5) -> list[dict]:
     if brand:
         params["filter.brand"] = brand
 
-    settings = get_settings()
-    if settings.kroger_location_id:
-        params["filter.locationId"] = settings.kroger_location_id
+    if location_id:
+        params["filter.locationId"] = location_id
+
+    url = f"{KROGER_API_BASE}/products"
+
+    # Debug logging
+    print(f"[KROGER SEARCH] URL: {url}", flush=True)
+    print(f"[KROGER SEARCH] Params: {params}", flush=True)
 
     response = requests.get(
-        f"{KROGER_API_BASE}/products",
+        url,
         params=params,
         headers={"Authorization": f"Bearer {token}"},
         timeout=10,
     )
+
+    print(f"[KROGER SEARCH] Status: {response.status_code}", flush=True)
+    print(f"[KROGER SEARCH] Response: {response.text[:500]}", flush=True)
+
     response.raise_for_status()
 
     data = response.json()
@@ -303,6 +344,44 @@ def search_products(term: str, brand: str = None, limit: int = 5) -> list[dict]:
         results.append(product)
 
     return results
+
+
+def search_products(term: str, brand: str = None, limit: int = 20) -> list[dict]:
+    """Search for products in the Kroger catalog.
+
+    Uses a fallback strategy:
+    1. Search with location filter
+    2. If no results, retry without location filter
+    3. If still no results, simplify the search term and retry
+    """
+    settings = get_settings()
+    location_id = settings.kroger_location_id if settings.kroger_location_id else None
+
+    # Try with location first (if configured)
+    if location_id:
+        results = _do_search(term, brand=brand, location_id=location_id, limit=limit)
+        if results:
+            print(f"[KROGER SEARCH] Found {len(results)} results with location filter", flush=True)
+            return results
+        print("[KROGER SEARCH] No results with location filter, retrying without...", flush=True)
+
+    # Fallback: no location filter
+    results = _do_search(term, brand=brand, location_id=None, limit=limit)
+    if results:
+        print(f"[KROGER SEARCH] Found {len(results)} results without location filter", flush=True)
+        return results
+
+    # Fallback: simplified term
+    simple_term = _simplify_search_term(term)
+    if simple_term != term.lower():
+        print(f"[KROGER SEARCH] Retrying with simplified term: '{simple_term}'", flush=True)
+        results = _do_search(simple_term, brand=brand, location_id=None, limit=limit)
+        if results:
+            print(f"[KROGER SEARCH] Found {len(results)} results with simplified term", flush=True)
+            return results
+
+    print(f"[KROGER SEARCH] No results found for '{term}' after all fallbacks", flush=True)
+    return []
 
 
 # =============================================================================
@@ -346,3 +425,58 @@ def add_items_to_cart(items: list[dict]) -> bool:
     except Exception as e:
         logger.error(f"Kroger cart error: {e}")
         return False
+
+
+# =============================================================================
+# Purchase History
+# =============================================================================
+
+
+def get_purchase_history(limit: int = 50) -> list[dict]:
+    """Get user's recent purchase history from Kroger.
+
+    Returns list of recently purchased products with brand/size info.
+    Requires profile.compact scope and user authentication.
+    """
+    token = _get_user_token()
+    if not token:
+        logger.error("No user token available for purchase history")
+        return []
+
+    try:
+        response = requests.get(
+            f"{KROGER_API_BASE}/me/purchases",
+            params={"filter.limit": limit},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        response.raise_for_status()
+
+        data = response.json()
+        purchases = data.get("data", [])
+
+        results = []
+        for p in purchases:
+            product = {
+                "productId": p.get("productId", ""),
+                "upc": p.get("upc", ""),
+                "description": p.get("description", ""),
+                "brand": p.get("brand", ""),
+                "category": p.get("categories", [""])[0] if p.get("categories") else "",
+                "size": p.get("size", ""),
+                "purchaseCount": p.get("quantity", 1),
+            }
+            results.append(product)
+
+        logger.info(f"Retrieved {len(results)} items from purchase history")
+        return results
+
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Kroger purchase history API error: {e}")
+        if e.response is not None:
+            logger.error(f"Response body: {e.response.text}")
+        return []
+
+    except Exception as e:
+        logger.error(f"Kroger purchase history error: {e}")
+        return []

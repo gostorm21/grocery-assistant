@@ -513,6 +513,94 @@ TOOL_DEFINITIONS = [
             "required": ["name"],
         },
     },
+    # --- Batch Operations ---
+    {
+        "name": "import_recipes_batch",
+        "description": "Import multiple recipes at once in a single transaction. More efficient than calling add_recipe multiple times.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recipes": {
+                    "type": "array",
+                    "description": "List of recipes to import.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Recipe name."},
+                            "ingredients": {
+                                "type": "array",
+                                "description": "List of ingredients.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string", "description": "Ingredient name."},
+                                        "quantity": {"type": "number", "description": "Amount needed."},
+                                        "unit": {"type": "string", "description": "Unit of measure."},
+                                    },
+                                    "required": ["name"],
+                                },
+                            },
+                            "instructions": {"type": "string", "description": "Cooking instructions."},
+                            "cuisine": {"type": "string", "description": "Cuisine type."},
+                            "tags": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Tags for categorization.",
+                            },
+                        },
+                        "required": ["name", "ingredients"],
+                    },
+                },
+            },
+            "required": ["recipes"],
+        },
+    },
+    {
+        "name": "match_purchases_to_ingredients",
+        "description": "Fetch Kroger purchase history and fuzzy match against ingredients missing Kroger IDs. Returns matches for user confirmation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "update_recipe",
+        "description": "Update an existing recipe - add/remove ingredients or update description.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recipe_name": {
+                    "type": "string",
+                    "description": "Name of the recipe to update.",
+                },
+                "add_ingredients": {
+                    "type": "array",
+                    "description": "Ingredients to add to the recipe.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Ingredient name."},
+                            "quantity": {"type": "number", "description": "Amount needed."},
+                            "unit": {"type": "string", "description": "Unit of measure."},
+                            "prep_notes": {"type": "string", "description": "Preparation notes."},
+                        },
+                        "required": ["name"],
+                    },
+                },
+                "remove_ingredients": {
+                    "type": "array",
+                    "description": "Names of ingredients to remove.",
+                    "items": {"type": "string"},
+                },
+                "update_description": {
+                    "type": "string",
+                    "description": "New description for the recipe.",
+                },
+            },
+            "required": ["recipe_name"],
+        },
+    },
 ]
 
 
@@ -606,6 +694,36 @@ def _log_event(
         db_session.add(event)
     except Exception as e:
         print(f"[_log_event] Failed to log event: {e}", flush=True)
+
+
+def _backfill_orphaned_notes(recipe: Recipe, db_session: Session) -> int:
+    """Link orphaned recipe notes to a newly created recipe.
+
+    Finds notes with matching recipe_name_normalized that have no recipe_id
+    and links them to this recipe.
+
+    Returns the count of notes linked.
+    """
+    from .models import normalize_recipe_name
+
+    normalized = normalize_recipe_name(recipe.name)
+
+    orphaned_notes = (
+        db_session.query(RecipeNote)
+        .filter(
+            RecipeNote.recipe_id.is_(None),
+            RecipeNote.recipe_name_normalized == normalized,
+        )
+        .all()
+    )
+
+    for note in orphaned_notes:
+        note.recipe_id = recipe.id
+
+    if orphaned_notes:
+        print(f"[_backfill_orphaned_notes] Linked {len(orphaned_notes)} orphaned notes to recipe '{recipe.name}'", flush=True)
+
+    return len(orphaned_notes)
 
 
 # =============================================================================
@@ -1103,7 +1221,10 @@ def execute_add_recipe(params: dict, db_session: Session, **kwargs) -> dict:
         # Identify ingredients without Kroger mapping
         unmapped = [i for i in new_ingredients if not i["has_kroger_mapping"]]
 
-        print(f"[add_recipe] SUCCESS: recipe id={recipe.id}, {len(new_ingredients)} ingredients, {len(unmapped)} unmapped", flush=True)
+        # Backfill orphaned notes that were created before this recipe
+        notes_linked = _backfill_orphaned_notes(recipe, db_session)
+
+        print(f"[add_recipe] SUCCESS: recipe id={recipe.id}, {len(new_ingredients)} ingredients, {len(unmapped)} unmapped, {notes_linked} notes linked", flush=True)
         _log_event(db_session, ActionType.ADD_RECIPE, f"name={name}, ingredients={len(new_ingredients)}", f"recipe_id={recipe.id}", {"recipe_id": recipe.id})
         return {
             "success": True,
@@ -1112,6 +1233,7 @@ def execute_add_recipe(params: dict, db_session: Session, **kwargs) -> dict:
             "ingredient_count": len(new_ingredients),
             "ingredients": new_ingredients,
             "unmapped_ingredients": [i["name"] for i in unmapped],
+            "notes_linked": notes_linked,
         }
     except Exception as e:
         print(f"[add_recipe] FAILED: {type(e).__name__}: {e}", flush=True)
@@ -1556,6 +1678,305 @@ def execute_check_off_item(params: dict, db_session: Session, **kwargs) -> dict:
 
 
 # =============================================================================
+# Batch Operations
+# =============================================================================
+
+
+def execute_import_recipes_batch(params: dict, db_session: Session, **kwargs) -> dict:
+    """Import multiple recipes in a single transaction."""
+    print(f"[import_recipes_batch] Called: {len(params.get('recipes', []))} recipes", flush=True)
+    try:
+        recipes_data = params.get("recipes", [])
+        if not recipes_data:
+            return {"error": "No recipes provided."}
+
+        recipes_created = []
+        ingredients_created = []
+        ingredients_needing_kroger = []
+        seen_ingredient_ids = set()
+
+        for recipe_data in recipes_data:
+            name = recipe_data.get("name", "").strip()
+            if not name:
+                continue
+
+            ingredients_list = recipe_data.get("ingredients", [])
+            instructions = (recipe_data.get("instructions") or "").strip() or None
+            cuisine = (recipe_data.get("cuisine") or "").strip() or None
+            tags = recipe_data.get("tags")
+
+            # Create recipe
+            recipe = Recipe(
+                name=name,
+                instructions=instructions,
+                cuisine=cuisine,
+                tags=tags,
+            )
+            db_session.add(recipe)
+            db_session.flush()
+
+            recipe_ings = []
+            for ing_data in ingredients_list:
+                ing_name = ing_data.get("name", "").strip()
+                if not ing_name:
+                    continue
+
+                ingredient = _get_or_create_ingredient(ing_name, db_session)
+
+                ri = RecipeIngredient(
+                    recipe_id=recipe.id,
+                    ingredient_id=ingredient.id,
+                    quantity=ing_data.get("quantity"),
+                    unit=(ing_data.get("unit") or "").strip() or None,
+                    prep_notes=(ing_data.get("prep_notes") or "").strip() or None,
+                )
+                db_session.add(ri)
+                recipe_ings.append(ingredient.name)
+
+                # Track unique ingredients
+                if ingredient.id not in seen_ingredient_ids:
+                    seen_ingredient_ids.add(ingredient.id)
+                    ingredients_created.append(ingredient.name)
+                    if not ingredient.kroger_product_id:
+                        ingredients_needing_kroger.append(ingredient.name)
+
+            # Backfill orphaned notes
+            notes_linked = _backfill_orphaned_notes(recipe, db_session)
+
+            recipes_created.append({
+                "name": name,
+                "id": recipe.id,
+                "ingredient_count": len(recipe_ings),
+                "notes_linked": notes_linked,
+            })
+
+        db_session.flush()
+
+        print(f"[import_recipes_batch] SUCCESS: {len(recipes_created)} recipes, {len(ingredients_created)} unique ingredients, {len(ingredients_needing_kroger)} need Kroger", flush=True)
+        _log_event(db_session, ActionType.ADD_RECIPE, f"batch import: {len(recipes_created)} recipes", f"ingredients={len(ingredients_created)}")
+        return {
+            "success": True,
+            "recipes_created": recipes_created,
+            "ingredients_created": ingredients_created,
+            "ingredients_needing_kroger": ingredients_needing_kroger,
+            "summary": {
+                "recipe_count": len(recipes_created),
+                "ingredient_count": len(ingredients_created),
+                "needing_kroger_count": len(ingredients_needing_kroger),
+            },
+        }
+    except Exception as e:
+        print(f"[import_recipes_batch] FAILED: {type(e).__name__}: {e}", flush=True)
+        return {"error": f"Failed to import recipes: {str(e)}"}
+
+
+def execute_match_purchases_to_ingredients(params: dict, db_session: Session, **kwargs) -> dict:
+    """Fetch Kroger purchase history and fuzzy match to ingredients missing Kroger IDs."""
+    print("[match_purchases_to_ingredients] Called", flush=True)
+    try:
+        from .kroger_service import get_purchase_history, is_user_authenticated, is_configured, get_auth_url
+        from difflib import SequenceMatcher
+
+        if not is_configured():
+            return {"error": "Kroger integration is not configured."}
+
+        if not is_user_authenticated():
+            auth_url = get_auth_url()
+            return {"error": "not_authenticated", "auth_url": auth_url, "message": "Visit the auth URL to connect your Kroger account and enable purchase history."}
+
+        # Fetch purchase history
+        purchases = get_purchase_history(limit=100)
+        if not purchases:
+            return {"error": "No purchase history available. You may need to re-authorize with the profile.compact scope."}
+
+        # Get all ingredients without Kroger IDs
+        unmapped_ingredients = (
+            db_session.query(Ingredient)
+            .filter(Ingredient.kroger_product_id.is_(None))
+            .all()
+        )
+
+        if not unmapped_ingredients:
+            return {"message": "All ingredients already have Kroger mappings!", "matches": [], "unmatched_ingredients": []}
+
+        # Build normalized name -> ingredient map
+        ingredient_map = {ing.normalized_name: ing for ing in unmapped_ingredients}
+
+        matches = []
+        matched_ingredient_ids = set()
+
+        for purchase in purchases:
+            purchase_desc = purchase.get("description", "").lower()
+            purchase_brand = purchase.get("brand", "")
+            purchase_id = purchase.get("productId") or purchase.get("upc", "")
+
+            if not purchase_id:
+                continue
+
+            # Try to match against each unmapped ingredient
+            for normalized_name, ingredient in ingredient_map.items():
+                if ingredient.id in matched_ingredient_ids:
+                    continue
+
+                # Calculate similarity
+                ratio = SequenceMatcher(None, normalized_name, purchase_desc).ratio()
+
+                # Also check if ingredient name appears in purchase description
+                name_in_desc = normalized_name in purchase_desc or any(
+                    word in purchase_desc for word in normalized_name.split() if len(word) > 3
+                )
+
+                confidence = ratio
+                if name_in_desc:
+                    confidence = max(confidence, 0.7)
+
+                if confidence >= 0.5:
+                    matches.append({
+                        "ingredient": ingredient.name,
+                        "ingredient_id": ingredient.id,
+                        "purchase": purchase.get("description", ""),
+                        "brand": purchase_brand,
+                        "productId": purchase_id,
+                        "size": purchase.get("size", ""),
+                        "confidence": round(confidence, 2),
+                    })
+                    matched_ingredient_ids.add(ingredient.id)
+
+        # Sort by confidence
+        matches.sort(key=lambda x: x["confidence"], reverse=True)
+
+        # Find unmatched ingredients
+        unmatched = [ing.name for ing in unmapped_ingredients if ing.id not in matched_ingredient_ids]
+
+        print(f"[match_purchases_to_ingredients] SUCCESS: {len(matches)} matches, {len(unmatched)} unmatched", flush=True)
+        return {
+            "matches": matches,
+            "unmatched_ingredients": unmatched,
+            "summary": {
+                "total_ingredients": len(unmapped_ingredients),
+                "matched": len(matches),
+                "unmatched": len(unmatched),
+            },
+        }
+    except Exception as e:
+        print(f"[match_purchases_to_ingredients] FAILED: {type(e).__name__}: {e}", flush=True)
+        return {"error": f"Failed to match purchases: {str(e)}"}
+
+
+def execute_update_recipe(params: dict, db_session: Session, **kwargs) -> dict:
+    """Update an existing recipe - add/remove ingredients or update description."""
+    print(f"[update_recipe] Called: recipe_name={params.get('recipe_name')}", flush=True)
+    try:
+        recipe_name = params["recipe_name"].strip()
+
+        # Find the recipe
+        recipe = (
+            db_session.query(Recipe)
+            .filter(Recipe.name.ilike(f"%{recipe_name}%"))
+            .first()
+        )
+
+        if not recipe:
+            return {"error": f"Recipe '{recipe_name}' not found."}
+
+        changes = []
+
+        # Update description
+        if params.get("update_description"):
+            recipe.description = params["update_description"].strip()
+            changes.append("description updated")
+
+        # Remove ingredients
+        remove_list = params.get("remove_ingredients", [])
+        removed = []
+        for ing_name in remove_list:
+            normalized = normalize_ingredient_name(ing_name)
+            ri = (
+                db_session.query(RecipeIngredient)
+                .join(Ingredient)
+                .filter(
+                    RecipeIngredient.recipe_id == recipe.id,
+                    Ingredient.normalized_name.contains(normalized),
+                )
+                .first()
+            )
+            if ri:
+                removed.append(ri.ingredient.name)
+                db_session.delete(ri)
+
+        if removed:
+            changes.append(f"removed: {', '.join(removed)}")
+
+        # Add ingredients
+        add_list = params.get("add_ingredients", [])
+        added = []
+        for ing_data in add_list:
+            ing_name = ing_data.get("name", "").strip()
+            if not ing_name:
+                continue
+
+            ingredient = _get_or_create_ingredient(ing_name, db_session)
+
+            # Check if already linked
+            existing = (
+                db_session.query(RecipeIngredient)
+                .filter(
+                    RecipeIngredient.recipe_id == recipe.id,
+                    RecipeIngredient.ingredient_id == ingredient.id,
+                )
+                .first()
+            )
+
+            if not existing:
+                ri = RecipeIngredient(
+                    recipe_id=recipe.id,
+                    ingredient_id=ingredient.id,
+                    quantity=ing_data.get("quantity"),
+                    unit=(ing_data.get("unit") or "").strip() or None,
+                    prep_notes=(ing_data.get("prep_notes") or "").strip() or None,
+                )
+                db_session.add(ri)
+                added.append(ingredient.name)
+
+        if added:
+            changes.append(f"added: {', '.join(added)}")
+
+        if not changes:
+            return {"message": "No changes made.", "recipe_name": recipe.name}
+
+        recipe.updated_at = datetime.utcnow()
+        db_session.flush()
+
+        # Get current ingredient list
+        current_ings = (
+            db_session.query(RecipeIngredient)
+            .filter(RecipeIngredient.recipe_id == recipe.id)
+            .all()
+        )
+        current_ingredients = [
+            {
+                "name": ri.ingredient.name,
+                "quantity": ri.quantity,
+                "unit": ri.unit,
+            }
+            for ri in current_ings
+        ]
+
+        print(f"[update_recipe] SUCCESS: {recipe.name} - {', '.join(changes)}", flush=True)
+        _log_event(db_session, ActionType.UPDATE_INGREDIENT, f"recipe={recipe.name}", f"changes: {', '.join(changes)}", {"recipe_id": recipe.id})
+        return {
+            "success": True,
+            "recipe_id": recipe.id,
+            "recipe_name": recipe.name,
+            "changes": changes,
+            "current_ingredients": current_ingredients,
+        }
+    except Exception as e:
+        print(f"[update_recipe] FAILED: {type(e).__name__}: {e}", flush=True)
+        return {"error": f"Failed to update recipe: {str(e)}"}
+
+
+# =============================================================================
 # Tool Dispatcher
 # =============================================================================
 
@@ -1589,6 +2010,10 @@ TOOL_HANDLERS = {
     "confirm_kroger_product": execute_confirm_kroger_product,
     "add_to_kroger_cart": execute_add_to_kroger_cart,
     "check_off_item": execute_check_off_item,
+    # Batch operations
+    "import_recipes_batch": execute_import_recipes_batch,
+    "match_purchases_to_ingredients": execute_match_purchases_to_ingredients,
+    "update_recipe": execute_update_recipe,
 }
 
 
