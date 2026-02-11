@@ -354,26 +354,40 @@ def _do_search(
 
         items = p.get("items", [])
         if items:
-            product["size"] = items[0].get("size", "")
-            price_info = items[0].get("price", {})
+            item = items[0]
+            product["size"] = item.get("size", "")
+            price_info = item.get("price", {})
             if price_info:
                 product["price"] = price_info.get("regular", price_info.get("promo"))
+            # Add fulfillment/availability info
+            fulfillment = item.get("fulfillment", {})
+            product["in_store"] = fulfillment.get("inStore", False)
+            product["curbside"] = fulfillment.get("curbside", False)
+            product["delivery"] = fulfillment.get("delivery", False)
         else:
             product["size"] = ""
             product["price"] = None
+            product["in_store"] = False
+            product["curbside"] = False
+            product["delivery"] = False
 
         results.append(product)
 
     return results
 
 
-def search_products(term: str, brand: str = None, limit: int = 20) -> list[dict]:
+def search_products(term: str, brand: str = None, limit: int = 20) -> dict:
     """Search for products in the Kroger catalog.
 
     Uses a fallback strategy:
     1. Search with location filter
     2. If no results, retry without location filter
     3. If still no results, simplify the search term and retry
+
+    Returns dict with:
+        - results: list of products
+        - location_filtered: whether results are filtered to user's store
+        - location_id: the location ID used (if any)
     """
     settings = get_settings()
     location_id = settings.kroger_location_id if settings.kroger_location_id else None
@@ -383,14 +397,14 @@ def search_products(term: str, brand: str = None, limit: int = 20) -> list[dict]
         results = _do_search(term, brand=brand, location_id=location_id, limit=limit)
         if results:
             print(f"[KROGER SEARCH] Found {len(results)} results with location filter", flush=True)
-            return results
+            return {"results": results, "location_filtered": True, "location_id": location_id}
         print("[KROGER SEARCH] No results with location filter, retrying without...", flush=True)
 
     # Fallback: no location filter
     results = _do_search(term, brand=brand, location_id=None, limit=limit)
     if results:
         print(f"[KROGER SEARCH] Found {len(results)} results without location filter", flush=True)
-        return results
+        return {"results": results, "location_filtered": False, "location_id": location_id}
 
     # Fallback: simplified term
     simple_term = _simplify_search_term(term)
@@ -399,10 +413,10 @@ def search_products(term: str, brand: str = None, limit: int = 20) -> list[dict]
         results = _do_search(simple_term, brand=brand, location_id=None, limit=limit)
         if results:
             print(f"[KROGER SEARCH] Found {len(results)} results with simplified term", flush=True)
-            return results
+            return {"results": results, "location_filtered": False, "location_id": location_id}
 
     print(f"[KROGER SEARCH] No results found for '{term}' after all fallbacks", flush=True)
-    return []
+    return {"results": [], "location_filtered": False, "location_id": location_id}
 
 
 # =============================================================================

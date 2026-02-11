@@ -1822,10 +1822,16 @@ def execute_resolve_kroger_product(params: dict, db_session: Session, **kwargs) 
             print(f"[resolve_kroger_product] Filtering out non-brand hint: '{brand_hint}'", flush=True)
             brand_hint = None
 
-        results = search_products(ingredient_name, brand=brand_hint, limit=5)
+        search_data = search_products(ingredient_name, brand=brand_hint, limit=5)
+        results = search_data["results"]
         print(f"[resolve_kroger_product] SUCCESS: {len(results)} results for '{ingredient_name}'", flush=True)
         _log_event(db_session, ActionType.RESOLVE_KROGER, f"ingredient={ingredient_name}", f"results={len(results)}")
-        return {"results": results, "ingredient_name": ingredient_name}
+        return {
+            "results": results,
+            "ingredient_name": ingredient_name,
+            "location_filtered": search_data["location_filtered"],
+            "location_id": search_data["location_id"],
+        }
     except Exception as e:
         print(f"[resolve_kroger_product] FAILED: {type(e).__name__}: {e}", flush=True)
         return {"error": f"Kroger search failed: {str(e)}"}
