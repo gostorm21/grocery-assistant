@@ -943,17 +943,22 @@ def execute_get_meal_plan(params: dict, db_session: Session, **kwargs) -> dict:
 
 
 def execute_get_pantry(params: dict, db_session: Session, **kwargs) -> dict:
-    """Get all pantry items."""
+    """Get all pantry items with ingredient info."""
     print("[get_pantry] Called", flush=True)
     items = db_session.query(PantryItem).order_by(PantryItem.item_name).all()
-    result = [
-        {
+    result = []
+    for i in items:
+        item_data = {
             "item_name": i.item_name,
             "quantity": i.quantity,
             "unit": i.unit,
+            "ingredient_id": i.ingredient_id,
         }
-        for i in items
-    ]
+        # Include ingredient info if linked
+        if i.ingredient_id and i.ingredient:
+            item_data["preferred_brand"] = i.ingredient.preferred_brand
+            item_data["has_kroger_mapping"] = i.ingredient.kroger_product_id is not None
+        result.append(item_data)
     print(f"[get_pantry] SUCCESS: {len(result)} items", flush=True)
     return {"items": result, "count": len(result)}
 
@@ -1513,13 +1518,13 @@ def execute_update_preference(params: dict, db_session: Session, **kwargs) -> di
 
 
 def execute_add_pantry_item(params: dict, db_session: Session, **kwargs) -> dict:
-    """Add or upsert a pantry item."""
+    """Add or upsert a pantry item, auto-linking to ingredient record."""
     print(f"[add_pantry_item] Called: {params.get('item_name')}", flush=True)
     try:
         item_name = params["item_name"].strip()
 
-        # Also ensure ingredient record exists
-        _get_or_create_ingredient(item_name, db_session)
+        # Get or create ingredient record and link to pantry item
+        ingredient = _get_or_create_ingredient(item_name, db_session)
 
         existing = (
             db_session.query(PantryItem)
@@ -1541,16 +1546,19 @@ def execute_add_pantry_item(params: dict, db_session: Session, **kwargs) -> dict
                 existing.quantity = quantity
             if unit:
                 existing.unit = unit
+            # Ensure ingredient link exists
+            if not existing.ingredient_id:
+                existing.ingredient_id = ingredient.id
             existing.updated_at = datetime.utcnow()
-            print(f"[add_pantry_item] SUCCESS: updated '{item_name}'", flush=True)
+            print(f"[add_pantry_item] SUCCESS: updated '{item_name}' (ingredient_id={ingredient.id})", flush=True)
             _log_event(db_session, ActionType.ADD_PANTRY_ITEM, f"name={item_name}", "updated")
-            return {"success": True, "item_name": item_name, "action": "updated"}
+            return {"success": True, "item_name": item_name, "action": "updated", "ingredient_id": ingredient.id}
         else:
-            new_item = PantryItem(item_name=item_name, quantity=quantity, unit=unit)
+            new_item = PantryItem(item_name=item_name, quantity=quantity, unit=unit, ingredient_id=ingredient.id)
             db_session.add(new_item)
-            print(f"[add_pantry_item] SUCCESS: added '{item_name}'", flush=True)
+            print(f"[add_pantry_item] SUCCESS: added '{item_name}' (ingredient_id={ingredient.id})", flush=True)
             _log_event(db_session, ActionType.ADD_PANTRY_ITEM, f"name={item_name}", "added")
-            return {"success": True, "item_name": item_name, "action": "added"}
+            return {"success": True, "item_name": item_name, "action": "added", "ingredient_id": ingredient.id}
     except Exception as e:
         print(f"[add_pantry_item] FAILED: {type(e).__name__}: {e}", flush=True)
         return {"error": f"Failed to add pantry item: {str(e)}"}
@@ -1733,9 +1741,12 @@ def execute_add_to_kroger_cart(params: dict, db_session: Session, **kwargs) -> d
 
         success = add_items_to_cart(resolved)
         if success:
-            print(f"[add_to_kroger_cart] SUCCESS: {len(resolved)} items, skipped {len(skipped_non_kroger)} non-Kroger", flush=True)
-            _log_event(db_session, ActionType.ADD_TO_CART, f"items={len(resolved)}", "success")
-            result = {"success": True, "items_added": len(resolved)}
+            # Archive the list after successful cart add
+            active_list.status = ShoppingListStatus.ORDERED
+            active_list.ordered_at = datetime.utcnow()
+            print(f"[add_to_kroger_cart] SUCCESS: {len(resolved)} items, skipped {len(skipped_non_kroger)} non-Kroger. List archived.", flush=True)
+            _log_event(db_session, ActionType.ADD_TO_CART, f"items={len(resolved)}", "success, list archived")
+            result = {"success": True, "items_added": len(resolved), "list_archived": True}
             if skipped_non_kroger:
                 result["skipped_non_kroger"] = skipped_non_kroger
             return result
