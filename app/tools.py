@@ -192,6 +192,28 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "update_item",
+        "description": "Update quantity or unit of an existing shopping list item.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item_name": {
+                    "type": "string",
+                    "description": "Name of item to update.",
+                },
+                "quantity": {
+                    "type": "number",
+                    "description": "New quantity.",
+                },
+                "unit": {
+                    "type": "string",
+                    "description": "New unit (optional).",
+                },
+            },
+            "required": ["item_name"],
+        },
+    },
+    {
         "name": "clear_list",
         "description": "Remove all items from the active shopping list.",
         "input_schema": {
@@ -408,6 +430,29 @@ TOOL_DEFINITIONS = [
                 },
             },
             "required": ["item_name"],
+        },
+    },
+    {
+        "name": "add_pantry_batch",
+        "description": "Add multiple items to pantry at once. More efficient than calling add_pantry_item repeatedly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "item_name": {"type": "string", "description": "Name of pantry item."},
+                            "quantity": {"type": "number", "description": "Optional quantity."},
+                            "unit": {"type": "string", "description": "Optional unit."},
+                        },
+                        "required": ["item_name"],
+                    },
+                    "description": "Array of pantry items to add.",
+                },
+            },
+            "required": ["items"],
         },
     },
     {
@@ -905,6 +950,25 @@ def execute_get_recipes(params: dict, db_session: Session, **kwargs) -> dict:
             "tags": r.tags,
         }
 
+        # Query recipe notes for this recipe
+        notes = (
+            db_session.query(RecipeNote)
+            .filter(RecipeNote.recipe_id == r.id)
+            .order_by(RecipeNote.created_at.desc())
+            .all()
+        )
+        recipe_data["note_count"] = len(notes)
+        recipe_data["has_positive_notes"] = any(n.outcome == NoteOutcome.SUCCESS for n in notes)
+        if notes:
+            latest = notes[0]
+            recipe_data["latest_note"] = {
+                "title": latest.title,
+                "outcome": latest.outcome.value if latest.outcome else None,
+                "user": latest.added_by,
+            }
+        else:
+            recipe_data["latest_note"] = None
+
         # Filter by tag if requested
         if params.get("tags"):
             tag_filter = params["tags"].lower()
@@ -1114,6 +1178,55 @@ def execute_remove_item(params: dict, db_session: Session, **kwargs) -> dict:
     except Exception as e:
         print(f"[remove_item] FAILED: {type(e).__name__}: {e}", flush=True)
         return {"error": f"Failed to remove item: {str(e)}"}
+
+
+def execute_update_item(params: dict, db_session: Session, **kwargs) -> dict:
+    """Update quantity or unit of an existing shopping list item."""
+    print(f"[update_item] Called: item_name={params.get('item_name')}", flush=True)
+    try:
+        item_name = params["item_name"].strip()
+        normalized = normalize_ingredient_name(item_name)
+
+        active_list = _get_or_create_active_list(db_session)
+
+        # Find matching item via ingredient (same pattern as remove_item)
+        item = (
+            db_session.query(ShoppingListItem)
+            .join(Ingredient)
+            .filter(
+                ShoppingListItem.shopping_list_id == active_list.id,
+                Ingredient.normalized_name.contains(normalized),
+            )
+            .first()
+        )
+
+        if not item:
+            print(f"[update_item] Not found: '{item_name}'", flush=True)
+            return {"error": f"Item '{item_name}' not found on the shopping list."}
+
+        # Update quantity if provided
+        if params.get("quantity") is not None:
+            try:
+                item.quantity = float(params["quantity"])
+            except (ValueError, TypeError):
+                pass
+
+        # Update unit if provided
+        if params.get("unit"):
+            item.unit = params["unit"].strip()
+
+        print(f"[update_item] SUCCESS: updated '{item.ingredient.name}' to quantity={item.quantity}, unit={item.unit}", flush=True)
+        _log_event(db_session, ActionType.REMOVE_ITEM, f"name={item_name}", f"updated quantity/unit")
+        return {
+            "success": True,
+            "item_id": item.id,
+            "name": item.ingredient.name,
+            "quantity": item.quantity,
+            "unit": item.unit,
+        }
+    except Exception as e:
+        print(f"[update_item] FAILED: {type(e).__name__}: {e}", flush=True)
+        return {"error": f"Failed to update item: {str(e)}"}
 
 
 def execute_clear_list(params: dict, db_session: Session, **kwargs) -> dict:
@@ -1562,6 +1675,74 @@ def execute_add_pantry_item(params: dict, db_session: Session, **kwargs) -> dict
     except Exception as e:
         print(f"[add_pantry_item] FAILED: {type(e).__name__}: {e}", flush=True)
         return {"error": f"Failed to add pantry item: {str(e)}"}
+
+
+def execute_add_pantry_batch(params: dict, db_session: Session, **kwargs) -> dict:
+    """Add multiple pantry items at once."""
+    print(f"[add_pantry_batch] Called with {len(params.get('items', []))} items", flush=True)
+    try:
+        items = params.get("items", [])
+        if not items:
+            return {"error": "No items provided."}
+
+        added = []
+        updated = []
+
+        for item_data in items:
+            item_name = item_data.get("item_name", "").strip()
+            if not item_name:
+                continue
+
+            # Get or create ingredient record
+            ingredient = _get_or_create_ingredient(item_name, db_session)
+
+            # Parse quantity
+            quantity = None
+            if item_data.get("quantity") is not None:
+                try:
+                    quantity = float(item_data["quantity"])
+                except (ValueError, TypeError):
+                    pass
+
+            unit = (item_data.get("unit") or "").strip() or None
+
+            # Check if pantry item exists
+            existing = (
+                db_session.query(PantryItem)
+                .filter(PantryItem.item_name.ilike(item_name))
+                .first()
+            )
+
+            if existing:
+                if quantity is not None:
+                    existing.quantity = quantity
+                if unit:
+                    existing.unit = unit
+                if not existing.ingredient_id:
+                    existing.ingredient_id = ingredient.id
+                existing.updated_at = datetime.utcnow()
+                updated.append(item_name)
+            else:
+                new_item = PantryItem(
+                    item_name=item_name,
+                    quantity=quantity,
+                    unit=unit,
+                    ingredient_id=ingredient.id,
+                )
+                db_session.add(new_item)
+                added.append(item_name)
+
+        _log_event(db_session, ActionType.ADD_PANTRY_ITEM, f"batch={len(items)}", f"added={len(added)}, updated={len(updated)}")
+        print(f"[add_pantry_batch] SUCCESS: added={added}, updated={updated}", flush=True)
+        return {
+            "success": True,
+            "added": added,
+            "updated": updated,
+            "count": len(added) + len(updated),
+        }
+    except Exception as e:
+        print(f"[add_pantry_batch] FAILED: {type(e).__name__}: {e}", flush=True)
+        return {"error": f"Failed to add pantry items: {str(e)}"}
 
 
 def execute_update_pantry_item(params: dict, db_session: Session, **kwargs) -> dict:
@@ -2230,6 +2411,7 @@ TOOL_HANDLERS = {
     # Write
     "add_item": execute_add_item,
     "remove_item": execute_remove_item,
+    "update_item": execute_update_item,
     "clear_list": execute_clear_list,
     "finalize_order": execute_finalize_order,
     "update_ingredient": execute_update_ingredient,
@@ -2241,6 +2423,7 @@ TOOL_HANDLERS = {
     "complete_meal_plan": execute_complete_meal_plan,
     "update_preference": execute_update_preference,
     "add_pantry_item": execute_add_pantry_item,
+    "add_pantry_batch": execute_add_pantry_batch,
     "update_pantry_item": execute_update_pantry_item,
     "remove_pantry_item": execute_remove_pantry_item,
     "resolve_kroger_product": execute_resolve_kroger_product,
