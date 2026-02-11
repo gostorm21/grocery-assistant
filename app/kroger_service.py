@@ -288,16 +288,24 @@ def _do_search(
     location_id: str = None,
     limit: int = 20,
 ) -> list[dict]:
-    """Execute a single Kroger product search with given parameters."""
+    """Execute a single Kroger product search with given parameters.
+
+    Note: brand parameter is ignored - Kroger's brand filter is case-sensitive
+    and too fragile. We include brand in the search term instead.
+    """
     token = _get_client_credentials_token()
 
+    # If brand hint provided, prepend to search term instead of using filter
+    # This is more forgiving than the case-sensitive brand filter
+    search_term = f"{brand} {term}" if brand else term
+
     params = {
-        "filter.term": term,
+        "filter.term": search_term,
         "filter.limit": limit,
     }
 
-    if brand:
-        params["filter.brand"] = brand
+    # Don't use filter.brand - it's case-sensitive and causes 0 results
+    # when casing doesn't match exactly (e.g., "boar's head" vs "Boar's Head")
 
     if location_id:
         params["filter.locationId"] = location_id
@@ -306,7 +314,7 @@ def _do_search(
 
     # Enhanced debug logging
     print(f"[KROGER SEARCH] === NEW SEARCH ===", flush=True)
-    print(f"[KROGER SEARCH] Term: '{term}'", flush=True)
+    print(f"[KROGER SEARCH] Term: '{search_term}'", flush=True)
     print(f"[KROGER SEARCH] Location: {location_id}", flush=True)
     print(f"[KROGER SEARCH] Full URL: {url}?{urlencode(params)}", flush=True)
 
